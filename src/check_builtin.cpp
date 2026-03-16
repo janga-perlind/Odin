@@ -534,12 +534,12 @@ gb_internal bool check_builtin_objc_procedure(CheckerContext *c, Operand *operan
 				return false;
 			}
 
-			if (ident.entity->kind != Entity_Procedure) {
+			if (ident.entity.load()->kind != Entity_Procedure) {
 				gbString e = expr_to_string(handler_node);
 
 				ERROR_BLOCK();
 				error(handler.expr, "'%.*s' expected a direct reference to a procedure", LIT(builtin_name));
-				if(ident.entity->kind == Entity_Variable) {
+				if(ident.entity.load()->kind == Entity_Variable) {
 					error_line("\tSuggestion: Variables referencing a procedure are not allowed, they are not a direct procedure reference.");
 				} else {
 					error_line("\tSuggestion: Ensure '%s' is not a runtime-evaluated expression.", e); // NOTE(harold): Is this case possible to hit?
@@ -2695,6 +2695,16 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 
 	case BuiltinProc_size_of: {
 		// size_of :: proc(Type or expr) -> untyped int
+		if (ce->args[0]->kind == Ast_UnaryExpr) {
+			ast_node(arg, UnaryExpr, ce->args[0]);
+			if (arg->op.kind == Token_And) {
+				ERROR_BLOCK();
+
+				warning(ce->args[0], "'size_of(&x)' returns the size of a pointer, not the size of x");
+				error_line("\tSuggestion: Use 'size_of(rawptr)' if you want the size of the pointer");
+			}
+		}
+
 		Operand o = {};
 		check_expr_or_type(c, &o, ce->args[0]);
 		if (o.mode == Addressing_Invalid) {
@@ -5194,6 +5204,8 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 	case BuiltinProc_count_zeros:
 	case BuiltinProc_count_trailing_zeros:
 	case BuiltinProc_count_leading_zeros:
+	case BuiltinProc_count_trailing_ones:
+	case BuiltinProc_count_leading_ones:
 	case BuiltinProc_reverse_bits:
 		{
 			Operand x = {};
@@ -5291,6 +5303,27 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 							v += 1;
 						}
 						break;
+
+					case BuiltinProc_count_trailing_ones:
+						for (u64 i = 0; i < bit_size; i++) {
+							u8 b = cast(u8)(i & 7);
+							u8 j = cast(u8)(i >> 3);
+							if ((rop[j] & (1 << b)) == 0) {
+								break;
+							}
+							v += 1;
+						}
+						break;
+					case BuiltinProc_count_leading_ones:
+						for (u64 i = bit_size-1; i < bit_size; i--) {
+							u8 b = cast(u8)(i & 7);
+							u8 j = cast(u8)(i >> 3);
+							if ((rop[j] & (1 << b)) == 0) {
+								break;
+							}
+							v += 1;
+						}
+						break;
 					}
 
 
@@ -5373,6 +5406,14 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 					return false;
 				}
 			}
+			if (!are_types_identical(x.type, y.type)) {
+				gbString xts = type_to_string(x.type);
+				gbString yts = type_to_string(y.type);
+				error(x.expr, "Mismatched types for '%.*s', got %s vs %s", LIT(builtin_name), xts, yts);
+				gb_string_free(yts);
+				gb_string_free(xts);
+				return false;
+			}
 
 			operand->mode = Addressing_Value;
 			operand->type = make_optional_ok_type(default_type(x.type));
@@ -5415,6 +5456,14 @@ gb_internal bool check_builtin_procedure(CheckerContext *c, Operand *operand, As
 					gb_string_free(xts);
 					return false;
 				}
+			}
+			if (!are_types_identical(x.type, y.type)) {
+				gbString xts = type_to_string(x.type);
+				gbString yts = type_to_string(y.type);
+				error(x.expr, "Mismatched types for '%.*s', got %s vs %s", LIT(builtin_name), xts, yts);
+				gb_string_free(yts);
+				gb_string_free(xts);
+				return false;
 			}
 
 			operand->mode = Addressing_Value;

@@ -89,7 +89,7 @@ gb_internal LLVMValueRef lb_mem_zero_ptr_internal(lbProcedure *p, LLVMValueRef p
 	bool is_inlinable = false;
 
 	i64 const_len = 0;
-	if (LLVMIsConstant(len)) {
+	if (!p->is_startup && LLVMIsConstant(len)) {
 		const_len = cast(i64)LLVMConstIntGetSExtValue(len);
 		// TODO(bill): Determine when it is better to do the `*.inline` versions
 		if (const_len <= lb_max_zero_init_size()) {
@@ -648,6 +648,18 @@ gb_internal lbValue lb_emit_count_leading_zeros(lbProcedure *p, lbValue x, Type 
 	return res;
 }
 
+gb_internal lbValue lb_emit_unary_arith(lbProcedure *p, TokenKind op, lbValue x, Type *type);
+
+gb_internal lbValue lb_emit_count_trailing_ones(lbProcedure *p, lbValue x, Type *type) {
+	lbValue z = lb_emit_unary_arith(p, Token_Xor, x, type);
+	return lb_emit_count_trailing_zeros(p, z, type);
+}
+
+gb_internal lbValue lb_emit_count_leading_ones(lbProcedure *p, lbValue x, Type *type) {
+	lbValue z = lb_emit_unary_arith(p, Token_Xor, x, type);
+	return lb_emit_count_leading_zeros(p, z, type);
+}
+
 
 
 gb_internal lbValue lb_emit_reverse_bits(lbProcedure *p, lbValue x, Type *type) {
@@ -803,7 +815,12 @@ gb_internal lbValue lb_emit_union_cast(lbProcedure *p, lbValue value, Type *type
 				args[5] = lb_typeid(m, dst_type);
 				args[6] = lb_emit_conv(p, value_, t_rawptr);
 			}
-			lb_emit_runtime_call(p, "type_assertion_check2", args);
+
+			char const *name = "type_assertion_check2_contextless";
+			if (p->context_stack.count > 0) {
+				name = "type_assertion_check2_with_context";
+			}
+			lb_emit_runtime_call(p, name, args);
 		}
 
 		return lb_emit_load(p, lb_emit_struct_ep(p, v.addr, 0));
@@ -877,7 +894,11 @@ gb_internal lbAddr lb_emit_any_cast_addr(lbProcedure *p, lbValue value, Type *ty
 				args[5] = dst_typeid;
 				args[6] = lb_emit_struct_ev(p, value, 0);
 			}
-			lb_emit_runtime_call(p, "type_assertion_check2", args);
+			char const *name = "type_assertion_check2_contextless";
+			if (p->context_stack.count > 0) {
+				name = "type_assertion_check2_with_context";
+			}
+			lb_emit_runtime_call(p, name, args);
 		}
 
 		return lb_addr(lb_emit_struct_ep(p, v.addr, 0));
@@ -2410,7 +2431,7 @@ gb_internal lbValue lb_handle_objc_block(lbProcedure *p, Ast *expr) {
 
 	Ast *proc_lit = unparen_expr(ce->args[capture_arg_count]);
 	if (proc_lit->kind == Ast_Ident) {
-		proc_lit = proc_lit->Ident.entity->decl_info->proc_lit;
+		proc_lit = proc_lit->Ident.entity.load()->decl_info->proc_lit;
 	}
 	GB_ASSERT(proc_lit->kind == Ast_ProcLit);
 
@@ -2868,9 +2889,13 @@ gb_internal lbValue lb_handle_objc_auto_send(lbProcedure *p, Ast *expr, Slice<lb
 			GB_ASSERT(se->expr->tav.mode == Addressing_Type && se->expr->tav.type->kind == Type_Named);
 
 			objc_class = entity_from_expr(se->expr);
-
 			GB_ASSERT(objc_class);
 			GB_ASSERT(objc_class->kind == Entity_TypeName);
+
+			if (objc_class->TypeName.is_type_alias) {
+				objc_class = objc_class->type->Named.type_name;
+			}
+
 			GB_ASSERT(objc_class->TypeName.objc_class_name != "");
 		}
 

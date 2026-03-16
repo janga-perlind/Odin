@@ -141,6 +141,7 @@ struct AttributeContext {
 	bool    instrumentation_exit  : 1;
 	bool    no_sanitize_address   : 1;
 	bool    no_sanitize_memory    : 1;
+	bool    no_sanitize_thread    : 1;
 	bool    rodata                : 1;
 	bool    ignore_duplicates     : 1;
 	u32 optimization_mode; // ProcedureOptimizationMode
@@ -220,14 +221,14 @@ struct DeclInfo {
 
 	Entity *     para_poly_original;
 
-	bool          is_using;
-	bool          where_clauses_evaluated;
-	bool          foreign_require_results;
+	bool                          is_using;
+	bool                          foreign_require_results;
+	std::atomic<bool>             where_clauses_evaluated;
 	std::atomic<ProcCheckedState> proc_checked_state;
 
-	BlockingMutex proc_checked_mutex;
-	isize         defer_used;
-	bool          defer_use_checked;
+	BlockingMutex     proc_checked_mutex;
+	isize             defer_used;
+	std::atomic<bool> defer_use_checked;
 
 	CommentGroup *comment;
 	CommentGroup *docs;
@@ -630,7 +631,7 @@ gb_internal void    scope_lookup_parent (Scope *s, String const &name, Scope **s
 gb_internal Entity *scope_insert (Scope *s, Entity *entity);
 
 
-gb_internal void      add_type_and_value      (CheckerContext *c, Ast *expression, AddressingMode mode, Type *type, ExactValue const &value, bool use_mutex=true);
+gb_internal void      add_type_and_value      (CheckerContext *c, Ast *expression, AddressingMode mode, Type *type, ExactValue const &value);
 gb_internal ExprInfo *check_get_expr_info     (CheckerContext *c, Ast *expr);
 gb_internal void      add_untyped             (CheckerContext *c, Ast *expression, AddressingMode mode, Type *basic_type, ExactValue const &value);
 gb_internal void      add_entity_use          (CheckerContext *c, Ast *identifier, Entity *entity);

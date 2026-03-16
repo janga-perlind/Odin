@@ -290,6 +290,7 @@ struct lbDefer {
 	isize       scope_index;
 	isize       context_stack_count;
 	lbBlock *   block;
+	TokenPos    pos;
 	union {
 		Ast *stmt;
 		struct {
@@ -345,6 +346,7 @@ struct lbProcedure {
 	Ast *        body;
 	u64          tags;
 	ProcInlining inlining;
+	ProcTailing  tailing;
 	bool         is_foreign;
 	bool         is_export;
 	bool         is_entry_point;
@@ -484,7 +486,7 @@ gb_internal void lb_emit_defer_stmts(lbProcedure *p, lbDeferExitKind kind, lbBlo
 gb_internal void lb_emit_defer_stmts(lbProcedure *p, lbDeferExitKind kind, lbBlock *block, Ast *node);
 gb_internal lbValue lb_emit_transmute(lbProcedure *p, lbValue value, Type *t);
 gb_internal lbValue lb_emit_comp(lbProcedure *p, TokenKind op_kind, lbValue left, lbValue right);
-gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining = ProcInlining_none);
+gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining = ProcInlining_none, ProcTailing tailing = ProcTailing_none);
 gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t);
 gb_internal lbValue lb_emit_comp_against_nil(lbProcedure *p, TokenKind op_kind, lbValue x);
 
@@ -618,7 +620,12 @@ gb_internal LLVMValueRef lb_mem_zero_ptr_internal(lbProcedure *p, LLVMValueRef p
 gb_internal LLVMValueRef lb_mem_zero_ptr_internal(lbProcedure *p, LLVMValueRef ptr, usize len, unsigned alignment, bool is_volatile);
 
 gb_internal gb_inline i64 lb_max_zero_init_size(void) {
-	return cast(i64)(4*build_context.int_size);
+	if (build_context.metrics.os == TargetOs_darwin && build_context.metrics.arch == TargetArch_arm64) {
+		// https://github.com/odin-lang/Odin/issues/6347
+		return cast(i64)(4*build_context.int_size);
+	} else {
+		return cast(i64)(8);
+	}
 }
 
 gb_internal LLVMTypeRef OdinLLVMGetArrayElementType(LLVMTypeRef type);
@@ -670,6 +677,7 @@ enum lbCallingConventionKind : unsigned {
 	lbCallingConvention_PreserveAll = 15,
 	lbCallingConvention_Swift = 16,
 	lbCallingConvention_CXX_FAST_TLS = 17,
+	lbCallingConvention_PreserveNone = 21,
 	lbCallingConvention_FirstTargetCC = 64,
 	lbCallingConvention_X86_StdCall = 64,
 	lbCallingConvention_X86_FastCall = 65,
@@ -722,6 +730,10 @@ lbCallingConventionKind const lb_calling_convention_map[ProcCC_MAX] = {
 
 	lbCallingConvention_Win64,        // ProcCC_Win64,
 	lbCallingConvention_X86_64_SysV,  // ProcCC_SysV,
+
+	lbCallingConvention_PreserveNone,  // ProcCC_PreserveNone,
+	lbCallingConvention_PreserveMost,  // ProcCC_PreserveMost,
+	lbCallingConvention_PreserveAll,   // ProcCC_PreserveAll,
 
 };
 

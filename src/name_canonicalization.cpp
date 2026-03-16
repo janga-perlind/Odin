@@ -559,8 +559,8 @@ gb_internal void write_canonical_parent_prefix(TypeWriter *w, Entity *e) {
 			// no prefix
 			return;
 		}
-		if (e->parent_proc_decl) {
-			Entity *p = e->parent_proc_decl->entity;
+		if (e->parent_proc_decl.load(std::memory_order_relaxed)) {
+			Entity *p = e->parent_proc_decl.load(std::memory_order_relaxed)->entity;
 			write_canonical_parent_prefix(w, p);
 			type_writer_append(w, p->token.string.text, p->token.string.len);
 			if (is_type_polymorphic(p->type)) {
@@ -838,7 +838,8 @@ gb_internal void write_type_to_canonical_string(TypeWriter *w, Type *type) {
 		} else {
 			type_writer_append_fmt(w, "%lld", type->BitSet.lower);
 			type_writer_append_fmt(w, CANONICAL_RANGE_OPERATOR);
-			type_writer_append_fmt(w, "%lld", type->BitSet.upper);
+			write_type_to_canonical_string(w, type->BitSet.elem);
+			type_writer_append_fmt(w, "(%lld)", type->BitSet.upper);
 		}
 		if (type->BitSet.underlying != nullptr) {
 			type_writer_appendc(w, ";");

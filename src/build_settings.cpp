@@ -9,6 +9,7 @@
 // #endif
 
 #define DEFAULT_MAX_ERROR_COLLECTOR_COUNT (36)
+#define DEFAULT_DID_YOU_MEAN_LIMIT (10)
 
 enum TargetOsKind : u16 {
 	TargetOs_Invalid,
@@ -360,12 +361,13 @@ enum OptInFeatureFlags : u64 {
 	OptInFeatureFlag_IntegerDivisionByZero_Self    = 1u<<4,
 	OptInFeatureFlag_IntegerDivisionByZero_AllBits = 1u<<5,
 
-
 	OptInFeatureFlag_IntegerDivisionByZero_ALL = OptInFeatureFlag_IntegerDivisionByZero_Trap|
 	                                             OptInFeatureFlag_IntegerDivisionByZero_Zero|
 	                                             OptInFeatureFlag_IntegerDivisionByZero_Self|
 	                                             OptInFeatureFlag_IntegerDivisionByZero_AllBits,
 
+	OptInFeatureFlag_ForceTypeAssert = 1u<<6,
+  OptInFeatureFlag_UsingStmt       = 1u<<7,
 };
 
 u64 get_feature_flag_from_name(String const &name) {
@@ -383,6 +385,12 @@ u64 get_feature_flag_from_name(String const &name) {
 	}
 	if (name == "integer-division-by-zero:all-bits") {
 		return OptInFeatureFlag_IntegerDivisionByZero_AllBits;
+	}
+	if (name == "using-stmt") {
+		return OptInFeatureFlag_UsingStmt;
+  }
+	if (name == "force-type-assert") {
+		return OptInFeatureFlag_ForceTypeAssert;
 	}
 
 
@@ -412,6 +420,12 @@ struct BuildCacheData {
 	bool copy_already_done;
 };
 
+
+enum LTOKind : i32 {
+	LTO_None,
+	LTO_Thin,
+	LTO_Thin_Files,
+};
 
 enum LinkerChoice : i32 {
 	Linker_Invalid = -1,
@@ -525,6 +539,7 @@ struct BuildContext {
 	bool   different_os;
 	bool   keep_object_files;
 	bool   disallow_do;
+	bool   show_import_graph;
 
 	IntegerDivisionByZeroKind integer_division_by_zero_behaviour;
 
@@ -553,6 +568,7 @@ struct BuildContext {
 
 	bool   use_single_module;
 	bool   use_separate_modules;
+	LTOKind lto_kind;
 	bool   module_per_file;
 	bool   cached;
 	BuildCacheData build_cache_data;
@@ -565,6 +581,8 @@ struct BuildContext {
 	bool   no_threaded_checker;
 
 	bool   show_debug_messages;
+
+	int    did_you_mean_limit;
 
 	bool   copy_file_contents;
 
@@ -582,6 +600,7 @@ struct BuildContext {
 
 	RelocMode reloc_mode;
 	bool   disable_red_zone;
+	bool   disable_unwind;
 
 	isize max_error_count;
 
@@ -835,9 +854,18 @@ gb_global TargetMetrics target_freestanding_amd64_win64 = {
 	TargetOs_freestanding,
 	TargetArch_amd64,
 	8, 8, AMD64_MAX_ALIGNMENT, 32,
-	str_lit("x86_64-pc-none-msvc"),
+	str_lit("x86_64-pc-windows-msvc"),
 	TargetABI_Win64,
 };
+
+gb_global TargetMetrics target_freestanding_amd64_mingw = {
+	TargetOs_freestanding,
+	TargetArch_amd64,
+	8, 8, AMD64_MAX_ALIGNMENT, 32,
+	str_lit("x86_64-pc-windows-gnu"),
+	TargetABI_Win64,
+};
+
 
 gb_global TargetMetrics target_freestanding_arm64 = {
 	TargetOs_freestanding,
@@ -901,6 +929,7 @@ gb_global NamedTargetMetrics named_targets[] = {
 
 	{ str_lit("freestanding_amd64_sysv"),  &target_freestanding_amd64_sysv },
 	{ str_lit("freestanding_amd64_win64"), &target_freestanding_amd64_win64 },
+	{ str_lit("freestanding_amd64_mingw"), &target_freestanding_amd64_mingw },
 
 	{ str_lit("freestanding_arm64"), &target_freestanding_arm64 },
 	{ str_lit("freestanding_arm32"), &target_freestanding_arm32 },
@@ -1703,6 +1732,29 @@ gb_internal char *token_pos_to_string(TokenPos const &pos) {
 	return s;
 }
 
+gb_internal String normalize_minimum_os_version_string(String version) {
+	GB_ASSERT(version.len > 0);
+
+	gbString normalized = gb_string_make(permanent_allocator(), "");
+
+	int granularity = 0;
+	String_Iterator it = {version, 0};
+	for (;; granularity++) {
+		String str = string_split_iterator(&it, '.');
+		if (str == "") break;
+		if (granularity > 0) {
+			normalized = gb_string_appendc(normalized, ".");
+		}
+		normalized = gb_string_append_length(normalized, str.text, str.len);
+	}
+
+	for (; granularity < 3; granularity++) {
+		normalized = gb_string_appendc(normalized, ".0");
+	}
+
+	return make_string_c(normalized);
+}
+
 gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subtarget) {
 	BuildContext *bc = &build_context;
 
@@ -1836,7 +1888,7 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 
 	if (bc->disable_red_zone) {
 		if (is_arch_wasm() && bc->metrics.os == TargetOs_freestanding) {
-			gb_printf_err("-disable-red-zone is not support for this target");
+			gb_printf_err("-disable-red-zone is not supported on this target");
 			gb_exit(1);
 		}
 	}
@@ -1972,9 +2024,11 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 			} else if (subtarget == Subtarget_iPhone || subtarget == Subtarget_iPhoneSimulator) {
 				// NOTE(harold): We default to 17.4 on iOS because that's when os_sync_wait_on_address was added and
 				//               we'd like to avoid any potential App Store issues by using the private ulock_* there.
-				bc->minimum_os_version_string = str_lit("17.4");
+				bc->minimum_os_version_string = str_lit("17.4.0");
 			}
 		}
+
+		bc->minimum_os_version_string = normalize_minimum_os_version_string(bc->minimum_os_version_string);
 
 		if (subtarget == Subtarget_iPhoneSimulator) {
 			// For the iPhoneSimulator subtarget, the version must be between 'ios' and '-simulator'.
@@ -2012,6 +2066,29 @@ gb_internal void init_build_context(TargetMetrics *cross_target, Subtarget subta
 		bc->use_separate_modules = false;
 	}
 
+	if (bc->lto_kind == LTO_Thin || bc->lto_kind == LTO_Thin_Files) {
+#if LLVM_VERSION_MAJOR < 17
+		gb_printf_err("-lto:thin requires LLVM 17 or later\n");
+		gb_exit(1);
+#endif
+		if (bc->build_mode == BuildMode_Assembly || bc->build_mode == BuildMode_LLVM_IR) {
+			gb_printf_err("-lto:thin is incompatible with -build-mode:asm and -build-mode:llvm-ir\n");
+			gb_exit(1);
+		}
+#if defined(GB_SYSTEM_WINDOWS)
+		if (bc->linker_choice != Linker_lld) {
+			gb_printf_err("-lto:thin on Windows requires -linker:lld\n");
+			gb_exit(1);
+		}
+#endif
+		if (bc->use_single_module) {
+			gb_printf_err("Warning: -lto:thin overrides -use-single-module; separate modules will be used\n");
+		}
+		bc->use_separate_modules = true;
+		if (bc->lto_kind == LTO_Thin_Files) {
+			bc->module_per_file = true;
+		}
+	}
 
 	bc->ODIN_VALGRIND_SUPPORT = false;
 	if (build_context.metrics.os != TargetOs_windows) {

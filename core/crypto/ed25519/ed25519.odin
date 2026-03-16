@@ -11,7 +11,6 @@ package ed25519
 import "core:crypto"
 import grp "core:crypto/_edwards25519"
 import "core:crypto/sha2"
-import "core:mem"
 
 // PRIVATE_KEY_SIZE is the byte-encoded private key size.
 PRIVATE_KEY_SIZE :: 32
@@ -46,6 +45,25 @@ Public_Key :: struct {
 	_neg_A:          grp.Group_Element,
 	_is_valid:       bool,
 	_is_initialized: bool,
+}
+
+// private_key_generate uses the system entropy source to generate a new
+// Private_Key.  This will only fail iff the system entropy source is
+// missing or broken.
+private_key_generate :: proc(priv_key: ^Private_Key) -> bool {
+	private_key_clear(priv_key)
+
+	if !crypto.HAS_RAND_BYTES {
+		return false
+	}
+
+	b: [PRIVATE_KEY_SIZE]byte
+	defer crypto.zero_explicit(&b, size_of(b))
+
+	crypto.rand_bytes(b[:])
+	private_key_set_bytes(priv_key, b[:])
+
+	return true
 }
 
 // private_key_set_bytes decodes a byte-encoded private key, and returns
@@ -89,7 +107,7 @@ private_key_bytes :: proc(priv_key: ^Private_Key, dst: []byte) {
 
 // private_key_clear clears priv_key to the uninitialized state.
 private_key_clear :: proc "contextless" (priv_key: ^Private_Key) {
-	mem.zero_explicit(priv_key, size_of(Private_Key))
+	crypto.zero_explicit(priv_key, size_of(Private_Key))
 }
 
 // sign writes the signature by priv_key over msg to sig.
@@ -170,7 +188,7 @@ public_key_set_bytes :: proc "contextless" (pub_key: ^Public_Key, b: []byte) -> 
 
 // public_key_set_priv sets pub_key to the public component of priv_key.
 public_key_set_priv :: proc(pub_key: ^Public_Key, priv_key: ^Private_Key) {
-	ensure(priv_key._is_initialized, "crypto/ed25519: uninitialized public key")
+	ensure(priv_key._is_initialized, "crypto/ed25519: uninitialized private key")
 
 	src := &priv_key._pub_key
 	copy(pub_key._b[:], src._b[:])

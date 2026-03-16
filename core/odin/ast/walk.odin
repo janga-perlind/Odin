@@ -222,6 +222,9 @@ walk :: proc(v: ^Visitor, node: ^Node) {
 		if n.label != nil {
 			walk(v, n.label)
 		}
+		if n.init != nil {
+			walk(v, n.init)
+		}
 		for val in n.vals {
 			if val != nil {
 				walk(v, val)
@@ -402,9 +405,7 @@ walk :: proc(v: ^Visitor, node: ^Node) {
 		walk_expr_list(v, n.fields)
 	case ^Bit_Set_Type:
 		walk(v, n.elem)
-		if n.underlying != nil {
-			walk(v, n.underlying)
-		}
+		walk(v, n.underlying)
 	case ^Map_Type:
 		walk(v, n.key)
 		walk(v, n.value)

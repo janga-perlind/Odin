@@ -679,6 +679,21 @@ gb_internal void check_struct_type(CheckerContext *ctx, Type *struct_type, Ast *
 			gb_unused(where_clause_ok);
 		}
 		check_struct_fields(ctx, node, &struct_type->Struct.fields, &struct_type->Struct.tags, st->fields, min_field_count, struct_type, context);
+
+		if (st->is_simple) {
+			bool success = true;
+			for (Entity *f : struct_type->Struct.fields) {
+				if (!is_type_nearly_simple_compare(f->type)) {
+					gbString s = type_to_string(f->type);
+					error(f->token, "'struct #simple' requires all fields to be at least 'nearly simple compare', got %s", s);
+					gb_string_free(s);
+				}
+			}
+			if (success) {
+				struct_type->Struct.is_simple = true;
+			}
+		}
+
 		wait_signal_set(&struct_type->Struct.fields_wait_signal);
 	}
 
@@ -1214,6 +1229,7 @@ gb_internal void check_bit_set_type(CheckerContext *c, Type *type, Type *named_t
 	ast_node(bs, BitSetType, node);
 	GB_ASSERT(type->kind == Type_BitSet);
 	type->BitSet.node = node;
+	type->BitSet.elem = t_invalid;
 
 	/* i64 const DEFAULT_BITS = cast(i64)(8*build_context.word_size); */
 	i64 const MAX_BITS = 128;
@@ -1830,11 +1846,14 @@ gb_internal Type *check_get_params(CheckerContext *ctx, Scope *scope, Ast *_para
 		Type *specialization = nullptr;
 
 		bool is_using = (p->flags&FieldFlag_using) != 0;
-		if ((check_vet_flags(param) & VetFlag_UsingParam) && is_using) {
-			ERROR_BLOCK();
-			error(param, "'using' on a procedure parameter is not allowed when '-vet' or '-vet-using-param' is applied");
-			error_line("\t'using' is considered bad practice to use as a statement/procedure parameter outside of immediate refactoring\n");
 
+
+		u64 feature_flags = check_feature_flags(ctx, param);
+
+		if (is_using && (feature_flags & OptInFeatureFlag_UsingStmt) == 0) {
+			ERROR_BLOCK();
+			error(param, "'using' has been disallowed as it is considered bad practice to use as a statement/procedure parameter outside of immediate refactoring");
+			error_line("\tIt you do require it for refactoring purposes or legacy code, it can be enabled on a per-file basis with '#+feature using-stmt'\n");
 		}
 
 		if (type_expr == nullptr) {
@@ -3750,6 +3769,20 @@ gb_internal bool check_type_internal(CheckerContext *ctx, Ast *e, Type **type, T
 		set_base_type(named_type, *type);
 		return true;
 	case_end;
+
+	default: {
+		Operand	o = {};
+		check_expr_base(ctx, &o, e, nullptr);
+
+		if (o.mode == Addressing_Constant &&
+		    o.value.kind == ExactValue_Typeid) {
+			Type *t = o.value.value_typeid;
+			if (t != nullptr && t != t_invalid) {
+				*type = t;
+				return true;
+			}
+		}
+	}
 	}
 
 	*type = t_invalid;

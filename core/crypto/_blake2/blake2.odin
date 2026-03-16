@@ -10,8 +10,9 @@ package _blake2
     Implementation of the BLAKE2 hashing algorithm, as defined in <https://datatracker.ietf.org/doc/html/rfc7693> and <https://www.blake2.net/>
 */
 
+import "base:intrinsics"
+import "core:crypto"
 import "core:encoding/endian"
-import "core:mem"
 
 BLAKE2S_BLOCK_SIZE :: 64
 BLAKE2S_SIZE :: 32
@@ -133,7 +134,7 @@ init :: proc "contextless" (ctx: ^$T, cfg: ^Blake2_Config) {
 			p[17] = cfg.tree.(Blake2_Tree).inner_hash_size
 		}
 	} else {
-		p[2], p[3] = 1, 1
+		p[2], p[3], p[4], p[5], p[6], p[7] = 1, 1, 0, 0, 0, 0
 	}
 	ctx.size = cfg.size
 	for i := 0; i < 8; i += 1 {
@@ -145,7 +146,7 @@ init :: proc "contextless" (ctx: ^$T, cfg: ^Blake2_Config) {
 		}
 	}
 
-	mem.zero(&ctx.x, size_of(ctx.x)) // Done with the scratch space, no barrier.
+	intrinsics.mem_zero(&ctx.x, size_of(ctx.x)) // Done with the scratch space, no barrier.
 
 	if cfg.tree != nil && cfg.tree.(Blake2_Tree).is_last_node {
 		ctx.is_last_node = true
@@ -222,7 +223,7 @@ reset :: proc "contextless" (ctx: ^$T) {
 		return
 	}
 
-	mem.zero_explicit(ctx, size_of(ctx^))
+	crypto.zero_explicit(ctx, size_of(ctx^))
 }
 
 @(private)
@@ -244,6 +245,9 @@ blake2s_final :: proc "contextless" (ctx: ^Blake2s_Context, hash: []byte) {
 		ctx.f[1] = 0xffffffff
 	}
 
+	for i := ctx.nx; i < BLAKE2S_BLOCK_SIZE; i+= 1 {
+		ctx.x[i] = 0
+	}
 	blocks(ctx, ctx.x[:])
 
 	dst: [BLAKE2S_SIZE]byte
@@ -272,6 +276,9 @@ blake2b_final :: proc "contextless" (ctx: ^Blake2b_Context, hash: []byte) {
 		ctx.f[1] = 0xffffffffffffffff
 	}
 
+	for i := ctx.nx; i < BLAKE2B_BLOCK_SIZE; i+= 1 {
+		ctx.x[i] = 0
+	}
 	blocks(ctx, ctx.x[:])
 
 	dst: [BLAKE2B_SIZE]byte

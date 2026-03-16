@@ -498,6 +498,13 @@ gb_internal LLVMValueRef lb_big_int_to_llvm(lbModule *m, Type *original_type, Bi
 	if (big_int_is_zero(a)) {
 		return LLVMConstNull(lb_type(m, original_type));
 	}
+	
+	BigInt val = {};
+	big_int_init(&val, a);
+
+	if (big_int_is_neg(&val)) {
+		mp_incr(&val);
+	}
 
 	size_t sz = cast(size_t)type_size_of(original_type);
 	u64 rop64[4] = {}; // 2 u64 is the maximum we will ever need, so doubling it will be fine :P
@@ -509,7 +516,7 @@ gb_internal LLVMValueRef lb_big_int_to_llvm(lbModule *m, Type *original_type, Bi
 	size_t nails = 0;
 	mp_endian endian = MP_LITTLE_ENDIAN;
 
-	max_count = mp_pack_count(a, nails, size);
+	max_count = mp_pack_count(&val, nails, size);
 	if (sz < max_count) {
 		debug_print_big_int(a);
 		gb_printf_err("%s -> %tu\n", type_to_string(original_type), sz);
@@ -520,7 +527,7 @@ gb_internal LLVMValueRef lb_big_int_to_llvm(lbModule *m, Type *original_type, Bi
 	mp_err err = mp_pack(rop, sz, &written,
 	                     MP_LSB_FIRST,
 	                     size, endian, nails,
-	                     a);
+	                     &val);
 	GB_ASSERT(err == MP_OKAY);
 
 	if (!is_type_endian_little(original_type)) {
@@ -531,12 +538,18 @@ gb_internal LLVMValueRef lb_big_int_to_llvm(lbModule *m, Type *original_type, Bi
 		}
 	}
 
+	if (big_int_is_neg(a)) {
+		// sizeof instead of sz for sign extend to work properly
+		for (size_t i = 0; i < sizeof rop64; i++) {
+			rop[i] = ~rop[i];
+		}
+	} 
+
+	big_int_dealloc(&val);
+
 	GB_ASSERT(!is_type_array(original_type));
 
 	LLVMValueRef value = LLVMConstIntOfArbitraryPrecision(lb_type(m, original_type), cast(unsigned)((sz+7)/8), cast(u64 *)rop);
-	if (big_int_is_neg(a)) {
-		value = LLVMConstNeg(value);
-	}
 
 	return value;
 }
@@ -665,6 +678,22 @@ LLVMValueRef llvm_const_pad_to_size(lbModule *m, LLVMValueRef val, LLVMTypeRef d
 }
 #endif
 
+gb_internal void lb_const_array_spread(lbModule *m, lbConstContext cc, Type *array, ExactValue value, lbValue *res) {
+	GB_ASSERT(array->kind == Type_Array);
+	
+	i64 count  = array->Array.count;
+	Type *elem = array->Array.elem;
+
+	lbValue single_elem = lb_const_value(m, elem, value, cc);
+
+	LLVMValueRef *elems = gb_alloc_array(permanent_allocator(), LLVMValueRef, cast(isize)count);
+	for (i64 i = 0; i < count; i++) {
+		elems[i] = single_elem.value;
+	}
+
+	res->value = llvm_const_array(m, lb_type(m, elem), elems, cast(unsigned)count);
+}
+
 gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lbConstContext cc, Type *value_type) {
 	if (cc.allow_local) {
 		cc.is_rodata = false;
@@ -723,13 +752,14 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 				}
 				LLVMValueRef tag = LLVMConstInt(LLVMStructGetTypeAtIndex(llvm_type, 1), tag_value, false);
 				LLVMValueRef padding = nullptr;
-				LLVMValueRef values[3] = {cv.value, tag, padding};
 
 				isize value_count = 2;
 				if (LLVMCountStructElementTypes(llvm_type) > 2) {
 					value_count = 3;
 					padding = LLVMConstNull(LLVMStructGetTypeAtIndex(llvm_type, 2));
 				}
+
+				LLVMValueRef values[3] = {cv.value, tag, padding};
 				res.value = llvm_const_named_struct_internal(m, llvm_type, values, value_count);
 				res.type = original_type;
 				return res;
@@ -953,34 +983,29 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 
 
 		}
-	} else if (is_type_array(type) && value.kind == ExactValue_String && !is_type_u8(core_array_type(type))) {
-		if (is_type_rune_array(type)) {
-			i64 count  = type->Array.count;
-			Type *elem = type->Array.elem;
-			LLVMTypeRef et = lb_type(m, elem);
+	} else if (is_type_rune_array(type) && value.kind == ExactValue_String && !is_type_u8(core_array_type(type))) {
+		i64 count  = type->Array.count;
+		Type *elem = type->Array.elem;
+		LLVMTypeRef et = lb_type(m, elem);
 
-			Rune rune;
-			isize offset = 0;
-			isize width = 1;
-			String s = value.value_string;
+		Rune rune;
+		isize offset = 0;
+		isize width = 1;
+		String s = value.value_string;
 
-			LLVMValueRef *elems = gb_alloc_array(permanent_allocator(), LLVMValueRef, cast(isize)count);
+		LLVMValueRef *elems = gb_alloc_array(permanent_allocator(), LLVMValueRef, cast(isize)count);
 
-			for (i64 i = 0; i < count && offset < s.len; i++) {
-				width = utf8_decode(s.text+offset, s.len-offset, &rune);
-				offset += width;
+		for (i64 i = 0; i < count && offset < s.len; i++) {
+			width = utf8_decode(s.text+offset, s.len-offset, &rune);
+			offset += width;
 
-				elems[i] = LLVMConstInt(et, rune, true);
+			elems[i] = LLVMConstInt(et, rune, true);
 
-			}
-			GB_ASSERT(offset == s.len);
-
-			res.value = llvm_const_array(m, et, elems, cast(unsigned)count);
-			return res;
 		}
-		// NOTE(bill, 2021-10-07): Allow for array programming value constants
-		Type *core_elem = core_array_type(type);
-		return lb_const_value(m, core_elem, value, cc);
+		GB_ASSERT(offset == s.len);
+
+		res.value = llvm_const_array(m, et, elems, cast(unsigned)count);
+		return res;
 	} else if (is_type_u8_array(type) && value.kind == ExactValue_String) {
 		GB_ASSERT(type->Array.count == value.value_string.len);
 		LLVMValueRef data = LLVMConstStringInContext(ctx,
@@ -991,21 +1016,9 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 		return res;
 	} else if (is_type_array(type) &&
 		value.kind != ExactValue_Invalid &&
-		value.kind != ExactValue_String &&
 		value.kind != ExactValue_Compound) {
-
-		i64 count  = type->Array.count;
-		Type *elem = type->Array.elem;
-
-
-		lbValue single_elem = lb_const_value(m, elem, value, cc);
-
-		LLVMValueRef *elems = gb_alloc_array(permanent_allocator(), LLVMValueRef, cast(isize)count);
-		for (i64 i = 0; i < count; i++) {
-			elems[i] = single_elem.value;
-		}
-
-		res.value = llvm_const_array(m, lb_type(m, elem), elems, cast(unsigned)count);
+			
+		lb_const_array_spread(m, cc, type, value, &res);
 		return res;
 	} else if (is_type_matrix(type) &&
 		value.kind != ExactValue_Invalid &&
@@ -1995,4 +2008,3 @@ gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lb
 
 	return lb_const_nil(m, original_type);
 }
-

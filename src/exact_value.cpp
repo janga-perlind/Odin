@@ -1,8 +1,6 @@
 #include <math.h>
 #include <stdlib.h>
 
-gb_global BlockingMutex hash_exact_value_mutex;
-
 struct Ast;
 struct HashKey;
 struct Type;
@@ -54,9 +52,6 @@ struct ExactValue {
 gb_global ExactValue const empty_exact_value = {};
 
 gb_internal uintptr hash_exact_value(ExactValue v) {
-	mutex_lock(&hash_exact_value_mutex);
-	defer (mutex_unlock(&hash_exact_value_mutex));
-
 	uintptr res = 0;
 	
 	switch (v.kind) {
@@ -947,6 +942,8 @@ gb_internal gb_inline i32 cmp_f64(f64 a, f64 b) {
 	return (a > b) - (a < b);
 }
 
+gb_internal bool compare_exact_values_compound_lit(TokenKind op, ExactValue x, ExactValue y);
+
 gb_internal bool compare_exact_values(TokenKind op, ExactValue x, ExactValue y) {
 	match_exact_values(&x, &y);
 
@@ -1055,9 +1052,19 @@ gb_internal bool compare_exact_values(TokenKind op, ExactValue x, ExactValue y) 
 		case Token_NotEq: return x.value_typeid != y.value_typeid;
 		}
 		break;
+
+	case ExactValue_Compound:
+		if (op != Token_CmpEq && op != Token_NotEq) {
+			return false;
+		}
+
+		if (x.kind != y.kind) {
+			return false;
+		}
+		return compare_exact_values_compound_lit(op, x, y);
 	}
 
-	GB_PANIC("Invalid comparison");
+	GB_PANIC("Invalid comparison: %d", x.kind);
 	return false;
 }
 

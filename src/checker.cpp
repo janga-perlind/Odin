@@ -495,15 +495,18 @@ gb_internal Entity *scope_insert_with_name(Scope *s, String const &name, Entity 
 		goto end;
 	}
 	if (s->parent != nullptr && (s->parent->flags & ScopeFlag_Proc) != 0) {
+		rw_mutex_shared_lock(&s->parent->mutex);
 		found = string_map_get(&s->parent->elements, key);
 		if (found) {
 			if ((*found)->flags & EntityFlag_Result) {
 				if (entity != *found) {
 					result = *found;
 				}
+				rw_mutex_shared_unlock(&s->parent->mutex);
 				goto end;
 			}
 		}
+		rw_mutex_shared_unlock(&s->parent->mutex);
 	}
 
 	string_map_set(&s->elements, key, entity);
@@ -1530,17 +1533,16 @@ gb_internal void destroy_checker_info(CheckerInfo *i) {
 	map_destroy(&i->load_directory_map);
 }
 
-gb_internal CheckerContext make_checker_context(Checker *c) {
-	CheckerContext ctx = {};
-	ctx.checker   = c;
-	ctx.info      = &c->info;
-	ctx.scope     = builtin_pkg->scope;
-	ctx.pkg       = builtin_pkg;
+gb_internal void init_checker_context(CheckerContext *ctx, Checker *c) {
+	ctx->checker   = c;
+	ctx->info      = &c->info;
+	ctx->scope     = builtin_pkg->scope;
+	ctx->pkg       = builtin_pkg;
 
-	ctx.type_path = new_checker_type_path(heap_allocator());
-	ctx.type_level = 0;
-	return ctx;
+	ctx->type_path = new_checker_type_path(heap_allocator());
+	ctx->type_level = 0;
 }
+
 gb_internal void destroy_checker_context(CheckerContext *ctx) {
 	destroy_checker_type_path(ctx->type_path, heap_allocator());
 }
@@ -1605,7 +1607,7 @@ gb_internal void init_checker(Checker *c) {
 	mpsc_init(&c->global_untyped_queue, a); // , 1<<20);
 	mpsc_init(&c->soa_types_to_complete, a); // , 1<<20);
 
-	c->builtin_ctx = make_checker_context(c);
+	init_checker_context(&c->builtin_ctx, c);
 }
 
 gb_internal void destroy_checker(Checker *c) {
@@ -1793,7 +1795,22 @@ gb_internal void add_untyped(CheckerContext *c, Ast *expr, AddressingMode mode, 
 	check_set_expr_info(c, expr, mode, type, value);
 }
 
-gb_internal void add_type_and_value(CheckerContext *ctx, Ast *expr, AddressingMode mode, Type *type, ExactValue const &value, bool use_mutex) {
+struct alignas(GB_CACHE_LINE_SIZE) TypeAndValueMutexStripes {
+	BlockingMutex mutex;
+	u8 padding[GB_CACHE_LINE_SIZE - gb_size_of(BlockingMutex)];
+};
+
+enum { TypeAndValueMutexStripes_COUNT = 128 };
+gb_global TypeAndValueMutexStripes tav_mutex_stripes[TypeAndValueMutexStripes_COUNT];
+
+gb_internal BlockingMutex *tav_mutex_for_node(Ast *node) {
+	GB_ASSERT(node != nullptr);
+	uintptr h = cast(uintptr)node;
+	h ^= h >> 6;
+	return &tav_mutex_stripes[h % TypeAndValueMutexStripes_COUNT].mutex;
+}
+
+gb_internal void add_type_and_value(CheckerContext *ctx, Ast *expr, AddressingMode mode, Type *type, ExactValue const &value) {
 	if (expr == nullptr) {
 		return;
 	}
@@ -1804,14 +1821,18 @@ gb_internal void add_type_and_value(CheckerContext *ctx, Ast *expr, AddressingMo
 		return;
 	}
 
-	BlockingMutex *mutex = &ctx->info->type_and_value_mutex;
-	if (ctx->decl) {
-		mutex = &ctx->decl->type_and_value_mutex;
-	} else if (ctx->pkg) {
-		mutex = &ctx->pkg->type_and_value_mutex;
-	}
+	BlockingMutex *mutex = tav_mutex_for_node(expr);
 
-	if (use_mutex) mutex_lock(mutex);
+	/* Previous logic:
+		BlockingMutex *mutex = &ctx->info->type_and_value_mutex;
+		if (ctx->decl) {
+			mutex = &ctx->decl->type_and_value_mutex;
+		} else if (ctx->pkg) {
+			mutex = &ctx->pkg->type_and_value_mutex;
+		}
+	*/
+
+	mutex_lock(mutex);
 	Ast *prev_expr = nullptr;
 	while (prev_expr != expr) {
 		prev_expr = expr;
@@ -1836,7 +1857,7 @@ gb_internal void add_type_and_value(CheckerContext *ctx, Ast *expr, AddressingMo
 			break;
 		};
 	}
-	if (use_mutex) mutex_unlock(mutex);
+	mutex_unlock(mutex);
 }
 
 gb_internal void add_entity_definition(CheckerInfo *i, Ast *identifier, Entity *entity) {
@@ -3581,7 +3602,7 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
 		return true;
 	} else if (name == "test") {
 		if (value != nullptr) {
-			error(value, "'%.*s' expects no parameter, or a string literal containing \"file\" or \"package\"", LIT(name));
+			error(value, "Expected no value for '%.*s'", LIT(name));
 		}
 		ac->test = true;
 		return true;
@@ -3629,13 +3650,13 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
 		return true;
 	} else if (name == "init") {
 		if (value != nullptr) {
-			error(value, "'%.*s' expects no parameter, or a string literal containing \"file\" or \"package\"", LIT(name));
+			error(value, "Expected no value for '%.*s'", LIT(name));
 		}
 		ac->init = true;
 		return true;
 	} else if (name == "fini") {
 		if (value != nullptr) {
-			error(value, "'%.*s' expects no parameter, or a string literal containing \"file\" or \"package\"", LIT(name));
+			error(value, "Expected no value for '%.*s'", LIT(name));
 		}
 		ac->fini = true;
 		return true;
@@ -3991,6 +4012,12 @@ gb_internal DECL_ATTRIBUTE_PROC(proc_decl_attribute) {
 		}
 		ac->no_sanitize_memory = true;
 		return true;
+	}  else if (name == "no_sanitize_thread") {
+		if (value != nullptr) {
+			error(value, "'%.*s' expects no parameter", LIT(name));
+		}
+		ac->no_sanitize_thread = true;
+		return true;
 	}
 	return false;
 }
@@ -4027,6 +4054,7 @@ gb_internal DECL_ATTRIBUTE_PROC(var_decl_attribute) {
 		} else if (ev.kind == ExactValue_String) {
 			String model = ev.value_string;
 			if (model == "default" ||
+			    model == "globaldynamic" ||
 			    model == "localdynamic" ||
 			    model == "initialexec" ||
 			    model == "localexec") {
@@ -4035,6 +4063,7 @@ gb_internal DECL_ATTRIBUTE_PROC(var_decl_attribute) {
 				ERROR_BLOCK();
 				error(elem, "Invalid thread local model '%.*s'. Valid models:", LIT(model));
 				error_line("\tdefault\n");
+				error_line("\tglobaldynamic\n");
 				error_line("\tlocaldynamic\n");
 				error_line("\tinitialexec\n");
 				error_line("\tlocalexec\n");
@@ -4962,7 +4991,7 @@ gb_internal void check_collect_entities(CheckerContext *c, Slice<Ast *> const &n
 
 gb_internal CheckerContext *create_checker_context(Checker *c) {
 	CheckerContext *ctx = gb_alloc_item(permanent_allocator(), CheckerContext);
-	*ctx = make_checker_context(c);
+	init_checker_context(ctx, c);
 	return ctx;
 }
 
@@ -5407,7 +5436,8 @@ gb_internal DECL_ATTRIBUTE_PROC(foreign_import_decl_attribute) {
 }
 
 gb_internal void check_foreign_import_fullpaths(Checker *c) {
-	CheckerContext ctx = make_checker_context(c);
+	CheckerContext ctx = {};
+	init_checker_context(&ctx, c);
 
 	UntypedExprInfoMap untyped = {};
 	defer (map_destroy(&untyped));
@@ -5790,7 +5820,7 @@ gb_internal void check_collect_entities_all(Checker *c) {
 	for (isize i = 0; i < thread_count; i++) {
 		auto *wd = &collect_entity_worker_data[i];
 		wd->c = c;
-		wd->ctx = make_checker_context(c);
+		init_checker_context(&wd->ctx, c);
 		map_init(&wd->untyped);
 	}
 
@@ -5831,7 +5861,7 @@ gb_internal void check_export_entities(Checker *c) {
 	for (isize i = 0; i < thread_count; i++) {
 		auto *wd = &collect_entity_worker_data[i];
 		map_clear(&wd->untyped);
-		wd->ctx = make_checker_context(c);
+		init_checker_context(&wd->ctx, c);
 	}
 
 	for (auto const &entry : c->info.packages) {
@@ -5898,7 +5928,8 @@ gb_internal void check_import_entities(Checker *c) {
 	}
 
 	TIME_SECTION("check_import_entities - collect file decls");
-	CheckerContext ctx = make_checker_context(c);
+	CheckerContext ctx = {};
+	init_checker_context(&ctx, c);
 
 	UntypedExprInfoMap untyped = {};
 	defer (map_destroy(&untyped));
@@ -6247,7 +6278,8 @@ gb_internal bool check_proc_info(Checker *c, ProcInfo *pi, UntypedExprInfoMap *u
 		}
 	}
 
-	CheckerContext ctx = make_checker_context(c);
+	CheckerContext ctx = {};
+	init_checker_context(&ctx, c);
 	defer (destroy_checker_context(&ctx));
 	reset_checker_context(&ctx, pi->file, untyped);
 	ctx.decl = pi->decl;

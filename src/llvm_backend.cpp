@@ -15,6 +15,8 @@
 #define LLVM_WEAK_MONOMORPHIZATION (USE_SEPARATE_MODULES && build_context.internal_weak_monomorphization)
 #endif
 
+#define LLVM_SET_INTERNAL_WEAK_LINKAGE(value) LLVMSetLinkage(value, USE_SEPARATE_MODULES ? LLVMWeakAnyLinkage : LLVMInternalLinkage);
+
 
 #include "llvm_backend.hpp"
 #include "llvm_abi.cpp"
@@ -169,16 +171,16 @@ gb_internal void lb_correct_entity_linkage(lbGenerator *gen) {
 		LLVMValueRef other_global = nullptr;
 		if (ec.e->kind == Entity_Variable) {
 			other_global = LLVMGetNamedGlobal(ec.other_module->mod, ec.cname);
-			if (other_global) {
-				LLVMSetLinkage(other_global, LLVMWeakAnyLinkage);
+			if (other_global && (LLVMGetInitializer(other_global) != nullptr || LLVMIsExternallyInitialized(other_global))) {
+				LLVM_SET_INTERNAL_WEAK_LINKAGE(other_global);
 				if (!ec.e->Variable.is_export && !ec.e->Variable.is_foreign) {
 					LLVMSetVisibility(other_global, LLVMHiddenVisibility);
 				}
 			}
 		} else if (ec.e->kind == Entity_Procedure) {
 			other_global = LLVMGetNamedFunction(ec.other_module->mod, ec.cname);
-			if (other_global) {
-				LLVMSetLinkage(other_global, LLVMWeakAnyLinkage);
+			if (other_global && LLVMCountBasicBlocks(other_global) != 0) {
+				LLVM_SET_INTERNAL_WEAK_LINKAGE(other_global);
 				if (!ec.e->Procedure.is_export && !ec.e->Procedure.is_foreign) {
 					LLVMSetVisibility(other_global, LLVMHiddenVisibility);
 				}
@@ -237,9 +239,9 @@ gb_internal lbContextData *lb_push_context_onto_stack(lbProcedure *p, lbAddr ctx
 
 gb_internal String lb_internal_gen_name_from_type(char const *prefix, Type *type) {
 	gbString str = gb_string_make(permanent_allocator(), prefix);
-	u64 hash = type_hash_canonical_type(type);
-	str = gb_string_appendc(str, "-");
-	str = gb_string_append_fmt(str, "%llu", cast(unsigned long long)hash);
+	str = gb_string_appendc(str, "$$");
+	gbString ct = temp_canonical_string(type);
+	str = gb_string_append_length(str, ct, gb_string_length(ct));
 	String proc_name = make_string(cast(u8 const *)str, gb_string_length(str));
 	return proc_name;
 }
@@ -2043,6 +2045,11 @@ gb_internal bool lb_init_global_var(lbModule *m, lbProcedure *p, Entity *e, Ast 
 			lb_emit_store(p, data, lb_emit_conv(p, gp, t_rawptr));
 			lb_emit_store(p, ti,   lb_typeid(p->module, var_type));
 		} else {
+			i64 sz = type_size_of(e->type);
+			if (sz >= 4 * 1024) {
+				warning(init_expr, "[Possible Code Generation Issue] Non-constant initialization is large (%lld bytes), and might cause problems with LLVM", cast(long long)sz);
+			}
+
 			LLVMTypeRef vt = llvm_addr_type(p->module, var.var);
 			lbValue src0 = lb_emit_conv(p, var.init, t);
 			LLVMValueRef src = OdinLLVMBuildTransmute(p, src0.value, vt);
@@ -2083,7 +2090,7 @@ gb_internal void lb_create_startup_runtime_generate_body(lbModule *m, lbProcedur
 			continue;
 		}
 
-		if (type_size_of(e->type) > 8) {
+		if (false && type_size_of(e->type) > 8) {
 			String ename = lb_get_entity_name(m, e);
 			gbString name = gb_string_make(permanent_allocator(), "");
 			name = gb_string_appendc(name, "__$startup$");
@@ -2092,7 +2099,7 @@ gb_internal void lb_create_startup_runtime_generate_body(lbModule *m, lbProcedur
 			lbProcedure *dummy = lb_create_dummy_procedure(m, make_string_c(name), dummy_type);
 			dummy->is_startup = true;
 			LLVMSetVisibility(dummy->value, LLVMHiddenVisibility);
-			LLVMSetLinkage(dummy->value, LLVMWeakAnyLinkage);
+			LLVM_SET_INTERNAL_WEAK_LINKAGE(p->value);
 
 			lb_begin_procedure_body(dummy);
 			lb_init_global_var(m, dummy, e, init_expr, var);
@@ -2109,7 +2116,7 @@ gb_internal void lb_create_startup_runtime_generate_body(lbModule *m, lbProcedur
 
 	for (Entity *e : info->init_procedures) {
 		lbValue value = lb_find_procedure_value_from_entity(m, e);
-		lb_emit_call(p, value, {}, ProcInlining_none);
+		lb_emit_call(p, value, {}, ProcInlining_none, ProcTailing_none);
 	}
 
 
@@ -2127,7 +2134,7 @@ gb_internal lbProcedure *lb_create_startup_runtime(lbModule *main_module, lbProc
 
 	// Make sure shared libraries call their own runtime startup on Linux.
 	LLVMSetVisibility(p->value, LLVMHiddenVisibility);
-	LLVMSetLinkage(p->value, LLVMWeakAnyLinkage);
+	LLVM_SET_INTERNAL_WEAK_LINKAGE(p->value);
 
 	p->global_variables = &global_variables;
 	p->objc_names       = objc_names;
@@ -2147,7 +2154,7 @@ gb_internal lbProcedure *lb_create_cleanup_runtime(lbModule *main_module) { // C
 
 	// Make sure shared libraries call their own runtime cleanup on Linux.
 	LLVMSetVisibility(p->value, LLVMHiddenVisibility);
-	LLVMSetLinkage(p->value, LLVMWeakAnyLinkage);
+	LLVM_SET_INTERNAL_WEAK_LINKAGE(p->value);
 
 	lb_begin_procedure_body(p);
 
@@ -2155,7 +2162,7 @@ gb_internal lbProcedure *lb_create_cleanup_runtime(lbModule *main_module) { // C
 
 	for (Entity *e : info->fini_procedures) {
 		lbValue value = lb_find_procedure_value_from_entity(main_module, e);
-		lb_emit_call(p, value, {}, ProcInlining_none);
+		lb_emit_call(p, value, {}, ProcInlining_none, ProcTailing_none);
 	}
 
 	lb_end_procedure_body(p);
@@ -2325,7 +2332,12 @@ gb_internal WORKER_TASK_PROC(lb_llvm_emit_worker_proc) {
 
 	auto wd = cast(lbLLVMEmitWorker *)data;
 
-	if (LLVMTargetMachineEmitToFile(wd->target_machine, wd->m->mod, cast(char *)wd->filepath_obj.text, wd->code_gen_file_type, &llvm_error)) {
+	if (build_context.lto_kind != LTO_None) {
+		if (LLVMWriteBitcodeToFile(wd->m->mod, cast(char *)wd->filepath_obj.text)) {
+			gb_printf_err("Failed to write bitcode file: %.*s\n", LIT(wd->filepath_obj));
+			exit_with_errors();
+		}
+	} else if (LLVMTargetMachineEmitToFile(wd->target_machine, wd->m->mod, cast(char *)wd->filepath_obj.text, wd->code_gen_file_type, &llvm_error)) {
 		gb_printf_err("LLVM Error: %s\n", llvm_error);
 		exit_with_errors();
 	}
@@ -2442,14 +2454,21 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 	// tsan - Linux, Darwin
 	// ubsan - Linux, Darwin, Windows (NOT SUPPORTED WITH LLVM C-API)
 
-	if (build_context.sanitizer_flags & SanitizerFlag_Address) {
-		array_add(&passes, "asan");
-	}
-	if (build_context.sanitizer_flags & SanitizerFlag_Memory) {
-		array_add(&passes, "msan");
-	}
-	if (build_context.sanitizer_flags & SanitizerFlag_Thread) {
-		array_add(&passes, "tsan");
+	// With LTO, sanitizer passes run at link time (via -fsanitize= linker flags)
+	// where the linker has whole-program visibility. Running them here too would
+	// double-instrument every module, producing "Redundant instrumentation" warnings.
+	// Per-function sanitize attributes in the bitcode are preserved and respected
+	// by the linker's sanitizer pass.
+	if (build_context.lto_kind == LTO_None) {
+		if (build_context.sanitizer_flags & SanitizerFlag_Address) {
+			array_add(&passes, "asan");
+		}
+		if (build_context.sanitizer_flags & SanitizerFlag_Memory) {
+			array_add(&passes, "msan");
+		}
+		if (build_context.sanitizer_flags & SanitizerFlag_Thread) {
+			array_add(&passes, "tsan");
+		}
 	}
 
 	if (passes.count == 0) {
@@ -2694,7 +2713,9 @@ gb_internal String lb_filepath_obj_for_module(lbModule *m) {
 
 	String ext = {};
 
-	if (build_context.build_mode == BuildMode_Assembly) {
+	if (build_context.lto_kind != LTO_None) {
+		ext = STR_LIT("bc");
+	} else if (build_context.build_mode == BuildMode_Assembly) {
 		ext = STR_LIT("S");
 	} else if (build_context.build_mode == BuildMode_Object) {
 		// Allow a user override for the object extension.
@@ -2769,7 +2790,13 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 
 			TIME_SECTION_WITH_LEN(section_name, gb_string_length(section_name));
 
-			if (LLVMTargetMachineEmitToFile(m->target_machine, m->mod, cast(char *)filepath_obj.text, code_gen_file_type, &llvm_error)) {
+			if (build_context.lto_kind != LTO_None) {
+				if (LLVMWriteBitcodeToFile(m->mod, cast(char *)filepath_obj.text)) {
+					gb_printf_err("Failed to write bitcode file: %.*s\n", LIT(filepath_obj));
+					exit_with_errors();
+					return false;
+				}
+			} else if (LLVMTargetMachineEmitToFile(m->target_machine, m->mod, cast(char *)filepath_obj.text, code_gen_file_type, &llvm_error)) {
 				gb_printf_err("LLVM Error: %s\n", llvm_error);
 				exit_with_errors();
 				return false;
@@ -2848,7 +2875,7 @@ gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *star
 	}
 
 	lbValue startup_runtime_value = {startup_runtime->value, startup_runtime->type};
-	lb_emit_call(p, startup_runtime_value, {}, ProcInlining_none);
+	lb_emit_call(p, startup_runtime_value, {}, ProcInlining_none, ProcTailing_none);
 
 	if (build_context.command_kind == Command_test) {
 		Type *t_Internal_Test = find_type_in_pkg(m->info, str_lit("testing"), str_lit("Internal_Test"));
@@ -2915,16 +2942,16 @@ gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *star
 
 		auto exit_args = array_make<lbValue>(temporary_allocator(), 1);
 		exit_args[0] = lb_emit_select(p, result, lb_const_int(m, t_int, 0), lb_const_int(m, t_int, 1));
-		lb_emit_call(p, exit_runner, exit_args, ProcInlining_none);
+		lb_emit_call(p, exit_runner, exit_args, ProcInlining_none, ProcTailing_none);
 	} else {
 		if (m->info->entry_point != nullptr) {
 			lbValue entry_point = lb_find_procedure_value_from_entity(m, m->info->entry_point);
-			lb_emit_call(p, entry_point, {}, ProcInlining_no_inline);
+			lb_emit_call(p, entry_point, {}, ProcInlining_no_inline, ProcTailing_none);
 		}
 
 		if (call_cleanup) {
 			lbValue cleanup_runtime_value = {cleanup_runtime->value, cleanup_runtime->type};
-			lb_emit_call(p, cleanup_runtime_value, {}, ProcInlining_none);
+			lb_emit_call(p, cleanup_runtime_value, {}, ProcInlining_none, ProcTailing_none);
 		}
 
 		if (is_dll_main) {
@@ -3418,7 +3445,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 			LLVMSetLinkage(g.value, LLVMDLLExportLinkage);
 			LLVMSetDLLStorageClass(g.value, LLVMDLLExportStorageClass);
 		} else if (!is_foreign) {
-			LLVMSetLinkage(g.value, USE_SEPARATE_MODULES ? LLVMWeakAnyLinkage : LLVMInternalLinkage);
+			LLVM_SET_INTERNAL_WEAK_LINKAGE(g.value);
 		}
 		lb_set_linkage_from_entity_flags(m, g.value, e->flags);
 		LLVMSetAlignment(g.value, cast(u32)type_align_of(e->type));

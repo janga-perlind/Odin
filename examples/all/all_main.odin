@@ -17,13 +17,16 @@ package all
 
 @(require) import "core:container/avl"
 @(require) import "core:container/bit_array"
+@(require) import "core:container/handle_map"
+@(require) import "core:container/intrusive/list"
+@(require) import "core:container/lru"
+@(require) import "core:container/pool"
 @(require) import "core:container/priority_queue"
 @(require) import "core:container/queue"
-@(require) import "core:container/small_array"
-@(require) import "core:container/lru"
-@(require) import "core:container/intrusive/list"
 @(require) import "core:container/rbtree"
+@(require) import "core:container/small_array"
 @(require) import "core:container/topological_sort"
+@(require) import "core:container/xar"
 
 @(require) import "core:crypto"
 @(require) import "core:crypto/aead"
@@ -35,6 +38,8 @@ package all
 @(require) import "core:crypto/chacha20poly1305"
 @(require) import chash "core:crypto/hash"
 @(require) import "core:crypto/deoxysii"
+@(require) import "core:crypto/ecdh"
+@(require) import "core:crypto/ecdsa"
 @(require) import "core:crypto/ed25519"
 @(require) import "core:crypto/hkdf"
 @(require) import "core:crypto/hmac"
@@ -103,6 +108,8 @@ package all
 @(require) import "core:mem/tlsf"
 @(require) import "core:mem/virtual"
 
+@(require) import "core:nbio"
+
 @(require) import "core:odin/ast"
 @(require) import doc_format "core:odin/doc-format"
 @(require) import "core:odin/parser"
@@ -111,7 +118,7 @@ package all
 @(require) import "core:prof/spall"
 
 @(require) import "core:os"
-@(require) import "core:os/os2"
+@(require) import "core:os/old"
 
 @(require) import "core:path/slashpath"
 @(require) import "core:path/filepath"
